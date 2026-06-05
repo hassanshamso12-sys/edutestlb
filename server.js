@@ -219,14 +219,16 @@ app.get('/api/results', authenticateTeacher, async (req, res) => {
   }
 });
 
-// Serve frontend in production (serve dist folder dynamically when present)
+// Serve frontend assets in production environment
 const distPath = path.join(__dirname, 'dist');
-if (fs.existsSync(distPath)) {
-  app.use(express.static(distPath));
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(distPath, 'index.html'));
-  });
-}
+
+// Mount the static assets directory directly without the if-statement gate
+app.use(express.static(distPath));
+
+// Always fulfill catch-all requests with index.html for client-side routing
+app.get('*', (req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
+});
 
 const server = http.createServer(app);
 const io = new Server(server, {
