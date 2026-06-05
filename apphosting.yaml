@@ -1,0 +1,5 @@
+runConfig:
+  runCommand: node server.js
+  environmentVariables:
+    - variable: NODE_ENV
+      value: production
