@@ -1,0 +1,46 @@
+[
+  {
+    "id": "session_1780691493880",
+    "pin": "914579",
+    "quizId": "exam_1780691369910",
+    "title": "what is letter A",
+    "date": "2026-06-05T20:31:33.880Z",
+    "hostUsername": "hassan",
+    "playersCount": 0,
+    "players": []
+  },
+  {
+    "id": "session_1780691755905",
+    "pin": "961626",
+    "quizId": "exam_1780691369910",
+    "title": "what is letter A",
+    "date": "2026-06-05T20:35:55.905Z",
+    "hostUsername": "hassan",
+    "playersCount": 1,
+    "players": [
+      {
+        "nickname": "koko",
+        "score": 739,
+        "correctCount": 1,
+        "totalQuestions": 2
+      }
+    ]
+  },
+  {
+    "id": "session_1780691992000",
+    "pin": "131774",
+    "quizId": "exam_1780691369910",
+    "title": "what is letter A",
+    "date": "2026-06-05T20:39:52.000Z",
+    "hostUsername": "hassan",
+    "playersCount": 1,
+    "players": [
+      {
+        "nickname": "hasan",
+        "score": 0,
+        "correctCount": 0,
+        "totalQuestions": 2
+      }
+    ]
+  }
+]

@@ -1,0 +1,55 @@
+[
+  {
+    "id": "exam_1780690422046",
+    "title": "Design software exam",
+    "description": "",
+    "questions": [
+      {
+        "question": "what is the letter A",
+        "options": [
+          "a letter",
+          "a number",
+          "non of above",
+          "both answers are true"
+        ],
+        "correctAnswer": 0,
+        "timeLimit": 10,
+        "points": 1000
+      }
+    ]
+  },
+  {
+    "id": "exam_1780691369910",
+    "title": "what is letter A",
+    "description": "",
+    "questions": [
+      {
+        "question": "what is the currency of lebanon",
+        "options": [
+          "USD",
+          "LBP",
+          "EUR",
+          "XIA"
+        ],
+        "correctAnswer": 0,
+        "timeLimit": 10,
+        "points": 1000,
+        "image": ""
+      },
+      {
+        "question": "what is the name of this boy",
+        "options": [
+          "Hikmat",
+          "Ghadi",
+          "Hassan",
+          "Fadi Haydar"
+        ],
+        "correctAnswer": 0,
+        "timeLimit": 10,
+        "points": 1000,
+        "image": ""
+      }
+    ],
+    "createdBy": "hassan"
+  }
+]
