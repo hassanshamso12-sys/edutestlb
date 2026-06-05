@@ -219,11 +219,12 @@ app.get('/api/results', authenticateTeacher, async (req, res) => {
   }
 });
 
-// Serve frontend in production
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, 'dist')));
+// Serve frontend in production (serve dist folder dynamically when present)
+const distPath = path.join(__dirname, 'dist');
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
   app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+    res.sendFile(path.join(distPath, 'index.html'));
   });
 }
 
