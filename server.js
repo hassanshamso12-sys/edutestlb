@@ -612,8 +612,8 @@ async function seedDefaultExams() {
   }
 }
 
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, async () => {
-  console.log(`Server running on port ${PORT}`);
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, '0.0.0.0', async () => {
+  console.log(`Server listening on 0.0.0.0:${PORT}`);
   await seedDefaultExams();
 });
