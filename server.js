@@ -19,6 +19,7 @@ app.use(express.json());
 // Initialize Firebase Admin
 const serviceAccountPath = path.join(__dirname, 'service-account.json');
 let adminApp;
+let db;
 
 try {
   if (fs.existsSync(serviceAccountPath)) {
@@ -32,11 +33,12 @@ try {
     });
     console.log('Firebase Admin initialized with Application Default Credentials (ADC).');
   }
+  db = getFirestore();
+  console.log('Firestore connected successfully.');
 } catch (e) {
-  console.error('Firebase Admin initialization error:', e);
+  console.error('Firebase Admin initialization error:', e.message);
+  process.exit(1); // Fail fast with a clear error rather than a silent crash
 }
-
-const db = getFirestore();
 
 // Helper to hash password
 function hashPassword(password) {
