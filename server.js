@@ -228,7 +228,7 @@ const distPath = path.join(__dirname, 'dist');
 app.use(express.static(distPath));
 
 // Always fulfill catch-all requests with index.html for client-side routing
-app.get('*', (req, res) => {
+app.get('*all', (req, res) => {
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
