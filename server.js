@@ -690,7 +690,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 2. Student Joins Room
+  // 2. Student Joins Room / Reconnects
   socket.on('join-game', ({ pin, nickname }) => {
     const cleanPin = pin.trim();
     const room = rooms.get(cleanPin);
@@ -699,14 +699,43 @@ io.on('connection', (socket) => {
       socket.emit('join-error', { message: 'Exam room not found. Check the PIN!' });
       return;
     }
-    if (room.status !== 'LOBBY') {
-      socket.emit('join-error', { message: 'This exam has already started!' });
-      return;
+
+    // Check if student is re-connecting to an existing player session
+    const existingPlayerKey = Object.keys(room.players).find(
+      key => room.players[key].nickname.toLowerCase() === nickname.trim().toLowerCase()
+    );
+
+    if (existingPlayerKey) {
+      const existingPlayer = room.players[existingPlayerKey];
+      if (!existingPlayer.connected) {
+        // Transfer session data to new socket.id
+        room.players[socket.id] = {
+          ...existingPlayer,
+          id: socket.id,
+          connected: true
+        };
+        delete room.players[existingPlayerKey]; // Remove old socket id mapping
+
+        socket.join(cleanPin);
+        socket.emit('join-success', { pin: cleanPin, nickname: nickname.trim(), resume: true });
+        
+        io.to(room.hostId).emit('player-list-update', Object.values(room.players).map(p => p.nickname));
+        console.log(`Student ${nickname} reconnected and resumed room ${cleanPin}`);
+
+        // If game is in progress, send them the current question immediately
+        if (room.status === 'IN_PROGRESS' && room.players[socket.id].currentQuestionIndex >= 0) {
+          sendQuestionToStudent(socket.id, pin, room.players[socket.id].currentQuestionIndex);
+        }
+        return;
+      } else {
+        socket.emit('join-error', { message: 'Nickname is already taken in this exam!' });
+        return;
+      }
     }
 
-    const nameExists = Object.values(room.players).some(p => p.nickname.toLowerCase() === nickname.trim().toLowerCase());
-    if (nameExists) {
-      socket.emit('join-error', { message: 'Nickname is already taken in this exam!' });
+    // New player join
+    if (room.status !== 'LOBBY') {
+      socket.emit('join-error', { message: 'This exam has already started!' });
       return;
     }
 
@@ -721,7 +750,8 @@ io.on('connection', (socket) => {
       answerIndex: -1,
       answerTime: 0,
       lastCorrect: false,
-      finished: false
+      finished: false,
+      connected: true
     };
 
     socket.join(cleanPin);
@@ -849,7 +879,7 @@ io.on('connection', (socket) => {
 
       if (room.players[socket.id]) {
         const nickname = room.players[socket.id].nickname;
-        delete room.players[socket.id];
+        room.players[socket.id].connected = false;
         
         io.to(room.hostId).emit('player-list-update', Object.values(room.players).map(p => p.nickname));
         
@@ -859,13 +889,13 @@ io.on('connection', (socket) => {
           // Check if remaining players are finished
           const activePlayers = Object.values(room.players);
           if (activePlayers.length > 0) {
-            const allFinished = activePlayers.every(p => p.finished);
+            const allFinished = activePlayers.every(p => !p.connected || p.finished);
             if (allFinished) {
               io.to(room.hostId).emit('all-players-finished');
             }
           }
         }
-        console.log(`Player ${nickname} left room ${pin}`);
+        console.log(`Player ${nickname} disconnected from room ${pin}`);
         break;
       }
     }
