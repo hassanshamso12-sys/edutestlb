@@ -7,7 +7,10 @@ export default function StudentClient({ socket, pin, nickname, onExit }) {
   const [countdown, setCountdown] = useState(3);
   const [currentQuestion, setCurrentQuestion] = useState(null);
   const [timer, setTimer] = useState(0);
-  const [selectedAnswer, setSelectedAnswer] = useState(-1);
+  const [selectedAnswer, setSelectedAnswer] = useState(-1); // will hold option index, string, or array
+  const [shortAnswerVal, setShortAnswerVal] = useState('');
+  const [matchingPairs, setMatchingPairs] = useState({});
+  const [selectedLeftIdx, setSelectedLeftIdx] = useState(null);
   const [feedback, setFeedback] = useState(null);
   const [personalScore, setPersonalScore] = useState(0);
   const [streak, setStreak] = useState(0);
@@ -50,6 +53,9 @@ export default function StudentClient({ socket, pin, nickname, onExit }) {
       setCurrentQuestion(questionData);
       setTimer(questionData.timeLimit);
       setSelectedAnswer(-1);
+      setShortAnswerVal('');
+      setMatchingPairs({});
+      setSelectedLeftIdx(null);
       setGameState('QUESTION');
       questionStartTime.current = Date.now();
       audio.playQuestionStart();
@@ -208,21 +214,151 @@ export default function StudentClient({ socket, pin, nickname, onExit }) {
           )}
         </div>
 
-        {/* Choices */}
-        <div className="game-grid">
-          {currentQuestion.options.map((option, idx) => (
+        {/* Choices / Inputs */}
+        {(currentQuestion.type === 'multiple_choice' || currentQuestion.type === 'true_false' || !currentQuestion.type) && (
+          <div className="game-grid">
+            {currentQuestion.options.map((option, idx) => (
+              <button
+                key={idx}
+                className={`option-card ${optionColors[idx]}`}
+                onClick={() => handleSelectAnswer(idx)}
+              >
+                <div className="choice-shape-wrapper" style={{ width: '40px', display: 'flex', justifyContent: 'center' }}>
+                  {shapes[idx]}
+                </div>
+                <span style={{ fontSize: '1.2rem' }}>{option}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {currentQuestion.type === 'short_answer' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', width: '100%', maxWidth: '600px', margin: '0 auto' }}>
+            <input
+              type="text"
+              className="input-field"
+              placeholder="Type your answer here..."
+              value={shortAnswerVal}
+              onChange={(e) => setShortAnswerVal(e.target.value)}
+              style={{ fontSize: '1.4rem', padding: '1.25rem', textAlign: 'center' }}
+            />
             <button
-              key={idx}
-              className={`option-card ${optionColors[idx]}`}
-              onClick={() => handleSelectAnswer(idx)}
+              className="btn btn-primary"
+              onClick={() => {
+                if (!shortAnswerVal.trim()) return;
+                handleSelectAnswer(shortAnswerVal.trim());
+              }}
+              style={{ width: '100%', padding: '1.25rem', fontSize: '1.2rem' }}
             >
-              <div className="choice-shape-wrapper" style={{ width: '40px', display: 'flex', justifyContent: 'center' }}>
-                {shapes[idx]}
-              </div>
-              <span style={{ fontSize: '1.2rem' }}>{option}</span>
+              Submit Answer
             </button>
-          ))}
-        </div>
+          </div>
+        )}
+
+        {currentQuestion.type === 'matching' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', width: '100%', maxWidth: '700px', margin: '0 auto' }}>
+            <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', textAlign: 'center' }}>
+              Select a left item, then select a matching right item.
+            </p>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+              {/* Left Side */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                {currentQuestion.leftItems.map((leftItem, idx) => {
+                  const matchedRight = matchingPairs[idx];
+                  const isSelected = selectedLeftIdx === idx;
+                  return (
+                    <button
+                      type="button"
+                      key={idx}
+                      className="glass-interactive"
+                      onClick={() => setSelectedLeftIdx(idx)}
+                      style={{
+                        padding: '0.85rem 1rem',
+                        borderRadius: '8px',
+                        textAlign: 'left',
+                        fontSize: '0.95rem',
+                        border: isSelected ? '2px solid var(--primary)' : '1px solid var(--border-color)',
+                        background: isSelected ? 'rgba(99, 102, 241, 0.1)' : matchedRight ? 'rgba(16, 185, 129, 0.05)' : 'rgba(0,0,0,0.1)'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <strong>{leftItem}</strong>
+                        {matchedRight && (
+                          <span style={{ fontSize: '0.8rem', color: 'var(--color-green)' }}>
+                            ➔ {matchedRight}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Right Side */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                {currentQuestion.rightItems.map((rightItem, idx) => {
+                  const isMatched = Object.values(matchingPairs).includes(rightItem);
+                  return (
+                    <button
+                      type="button"
+                      key={idx}
+                      className="glass-interactive"
+                      disabled={selectedLeftIdx === null}
+                      onClick={() => {
+                        const newMatches = { ...matchingPairs };
+                        Object.keys(newMatches).forEach(k => {
+                          if (newMatches[k] === rightItem) delete newMatches[k];
+                        });
+                        newMatches[selectedLeftIdx] = rightItem;
+                        setMatchingPairs(newMatches);
+                        setSelectedLeftIdx(null);
+                      }}
+                      style={{
+                        padding: '0.85rem 1rem',
+                        borderRadius: '8px',
+                        textAlign: 'left',
+                        fontSize: '0.95rem',
+                        opacity: selectedLeftIdx === null ? 0.6 : 1,
+                        border: '1px solid var(--border-color)',
+                        background: isMatched ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.15)'
+                      }}
+                    >
+                      <span style={{ color: isMatched ? 'var(--text-muted)' : 'white' }}>
+                        {rightItem} {isMatched && '(Matched)'}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  setMatchingPairs({});
+                  setSelectedLeftIdx(null);
+                }}
+                style={{ flex: 1 }}
+              >
+                Reset
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  const matchesArray = currentQuestion.leftItems.map((_, idx) => matchingPairs[idx] || null);
+                  handleSelectAnswer(matchesArray);
+                }}
+                style={{ flex: 2 }}
+              >
+                Submit Matches
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Footer */}
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '1.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>

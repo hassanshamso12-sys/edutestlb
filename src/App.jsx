@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
 import { Sparkles, User, KeyRound } from 'lucide-react';
 import StudentClient from './components/StudentClient';
+import StudentStaticClient from './components/StudentStaticClient';
 import TeacherDashboard from './components/TeacherDashboard';
 import TeacherHost from './components/TeacherHost';
 import TeacherAuth from './components/TeacherAuth';
@@ -9,7 +10,7 @@ import { audio } from './utils/audio';
 import './App.css'; 
 
 export default function App() {
-  const [role, setRole] = useState('INIT'); // INIT, LANDING, STUDENT_GAME, TEACHER_AUTH, TEACHER_DASHBOARD, TEACHER_HOST
+  const [role, setRole] = useState('INIT'); // INIT, LANDING, STUDENT_GAME, STUDENT_STATIC, TEACHER_AUTH, TEACHER_DASHBOARD, TEACHER_HOST
   
   // Student inputs
   const [pin, setPin] = useState('');
@@ -20,6 +21,7 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState('');
   const [joining, setJoining] = useState(false);
   const [activeHostQuizId, setActiveHostQuizId] = useState(null);
+  const [staticExamData, setStaticExamData] = useState(null);
 
   // Authenticated Teacher states
   const [teacherToken, setTeacherToken] = useState(null);
@@ -71,7 +73,7 @@ export default function App() {
   };
 
   // Student Join Room Logic
-  const handleStudentJoin = (e) => {
+  const handleStudentJoin = async (e) => {
     e.preventDefault();
     if (!pin.trim() || !nickname.trim()) {
       setErrorMessage('Please fill in both fields!');
@@ -80,31 +82,58 @@ export default function App() {
     setErrorMessage('');
     setJoining(true);
 
-    const newSocket = io();
-    
-    newSocket.on('connect', () => {
-      newSocket.emit('join-game', { pin, nickname });
-    });
+    try {
+      const res = await fetch('/api/exams/join', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin, nickname })
+      });
 
-    newSocket.on('join-success', ({ pin: joinedPin, nickname: joinedName }) => {
-      setSocket(newSocket);
-      setPin(joinedPin);
-      setNickname(joinedName);
-      setRole('STUDENT_GAME');
-      setJoining(false);
-    });
+      if (!res.ok) {
+        const errData = await res.json();
+        setErrorMessage(errData.error || 'Failed to join exam.');
+        setJoining(false);
+        return;
+      }
 
-    newSocket.on('join-error', ({ message }) => {
-      setErrorMessage(message);
-      newSocket.disconnect();
-      setJoining(false);
-    });
+      const joinData = await res.json();
 
-    newSocket.on('connect_error', () => {
-      setErrorMessage('Unable to connect to exam server. Is the server running?');
-      newSocket.disconnect();
+      if (joinData.type === 'live') {
+        const newSocket = io();
+        
+        newSocket.on('connect', () => {
+          newSocket.emit('join-game', { pin, nickname });
+        });
+
+        newSocket.on('join-success', ({ pin: joinedPin, nickname: joinedName }) => {
+          setSocket(newSocket);
+          setPin(joinedPin);
+          setNickname(joinedName);
+          setRole('STUDENT_GAME');
+          setJoining(false);
+        });
+
+        newSocket.on('join-error', ({ message }) => {
+          setErrorMessage(message);
+          newSocket.disconnect();
+          setJoining(false);
+        });
+
+        newSocket.on('connect_error', () => {
+          setErrorMessage('Unable to connect to exam server. Is the server running?');
+          newSocket.disconnect();
+          setJoining(false);
+        });
+      } else if (joinData.type === 'static') {
+        setStaticExamData(joinData.exam);
+        setRole('STUDENT_STATIC');
+        setJoining(false);
+      }
+    } catch (err) {
+      console.error(err);
+      setErrorMessage('Could not connect to join server.');
       setJoining(false);
-    });
+    }
   };
 
   const handleExitStudent = () => {
@@ -254,6 +283,22 @@ export default function App() {
   // 3. Play Game Screen
   if (role === 'STUDENT_GAME' && socket) {
     return <StudentClient socket={socket} pin={pin} nickname={nickname} onExit={handleExitStudent} />;
+  }
+
+  // 3b. Play Static Exam Screen
+  if (role === 'STUDENT_STATIC' && staticExamData) {
+    return (
+      <StudentStaticClient 
+        exam={staticExamData} 
+        nickname={nickname} 
+        onExit={() => {
+          setStaticExamData(null);
+          setPin('');
+          setNickname('');
+          setRole('LANDING');
+        }} 
+      />
+    );
   }
 
   // 4. Authenticated Teacher Dashboard

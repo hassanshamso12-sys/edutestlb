@@ -172,6 +172,23 @@ app.post('/api/exams', authenticateTeacher, async (req, res) => {
       }
     }
 
+    if (newExam.examType === 'static') {
+      let existingPin = null;
+      let existingPinCreatedAt = null;
+      if (doc.exists) {
+        existingPin = doc.data().staticPin;
+        existingPinCreatedAt = doc.data().staticPinCreatedAt;
+      }
+
+      if (!existingPin || isPinExpired(existingPinCreatedAt)) {
+        newExam.staticPin = await getUniqueStaticPin();
+        newExam.staticPinCreatedAt = new Date().toISOString();
+      } else {
+        newExam.staticPin = existingPin;
+        newExam.staticPinCreatedAt = existingPinCreatedAt;
+      }
+    }
+
     await docRef.set(newExam);
     res.json({ success: true, exam: newExam });
   } catch (err) {
@@ -197,6 +214,167 @@ app.delete('/api/exams/:id', authenticateTeacher, async (req, res) => {
   } catch (err) {
     console.error('Delete exam error:', err);
     res.status(500).json({ error: 'Failed to delete exam' });
+  }
+});
+
+// Join exam verification endpoint (handles both live rooms and static exams)
+app.post('/api/exams/join', async (req, res) => {
+  const { pin, nickname } = req.body;
+  if (!pin || !nickname) {
+    return res.status(400).json({ error: 'PIN and nickname are required' });
+  }
+
+  const cleanPin = pin.trim();
+  const cleanNickname = nickname.trim();
+
+  // 1. Check live rooms first
+  if (rooms.has(cleanPin)) {
+    const room = rooms.get(cleanPin);
+    if (room.status !== 'LOBBY') {
+      return res.status(400).json({ error: 'This live exam has already started!' });
+    }
+    const nameExists = Object.values(room.players).some(
+      p => p.nickname.toLowerCase() === cleanNickname.toLowerCase()
+    );
+    if (nameExists) {
+      return res.status(400).json({ error: 'Nickname is already taken in this exam!' });
+    }
+    return res.json({ success: true, type: 'live' });
+  }
+
+  // 2. Check static exams in Firestore
+  try {
+    const snapshot = await db.collection('examify_exams')
+      .where('staticPin', '==', cleanPin)
+      .get();
+
+    if (snapshot.empty) {
+      return res.status(404).json({ error: 'Exam room not found. Check the PIN!' });
+    }
+
+    let examDoc = snapshot.docs[0];
+    let exam = examDoc.data();
+
+    // Check if the pin has expired
+    if (isPinExpired(exam.staticPinCreatedAt)) {
+      const newPin = await getUniqueStaticPin();
+      await db.collection('examify_exams').doc(exam.id).update({
+        staticPin: newPin,
+        staticPinCreatedAt: new Date().toISOString()
+      });
+      return res.status(400).json({ error: 'This exam PIN has expired. Ask your teacher for the new daily PIN!' });
+    }
+
+    if (exam.examType !== 'static') {
+      return res.status(400).json({ error: 'This PIN belongs to a live exam that is not active yet.' });
+    }
+
+    // Strip answers from questions to prevent client-side cheating
+    const strippedQuestions = exam.questions.map(q => {
+      const { correctAnswer, matchPairs, ...rest } = q;
+      if (q.type === 'matching') {
+        const leftItems = q.matchPairs.map(p => p.left);
+        const rightItems = q.matchPairs.map(p => p.right).sort(() => Math.random() - 0.5);
+        return { ...rest, leftItems, rightItems };
+      }
+      return rest;
+    });
+
+    const strippedExam = {
+      id: exam.id,
+      title: exam.title,
+      description: exam.description,
+      examType: 'static',
+      questions: strippedQuestions
+    };
+
+    res.json({ success: true, type: 'static', exam: strippedExam });
+  } catch (err) {
+    console.error('Join static exam error:', err);
+    res.status(500).json({ error: 'Failed to process request' });
+  }
+});
+
+// Submit static exam answers endpoint
+app.post('/api/exams/static/submit', async (req, res) => {
+  const { examId, nickname, answers } = req.body;
+  if (!examId || !nickname || !answers) {
+    return res.status(400).json({ error: 'Missing required submission details' });
+  }
+
+  try {
+    const examDoc = await db.collection('examify_exams').doc(examId).get();
+    if (!examDoc.exists) {
+      return res.status(404).json({ error: 'Exam not found' });
+    }
+    const exam = examDoc.data();
+
+    let score = 0;
+    let correctCount = 0;
+    const questionsFeedback = [];
+
+    exam.questions.forEach((q, idx) => {
+      const studentAnswer = answers[idx];
+      let isCorrect = false;
+
+      if (q.type === 'multiple_choice' || !q.type) {
+        isCorrect = parseInt(studentAnswer) === parseInt(q.correctAnswer);
+      } else if (q.type === 'true_false') {
+        isCorrect = parseInt(studentAnswer) === parseInt(q.correctAnswer);
+      } else if (q.type === 'short_answer') {
+        isCorrect = String(studentAnswer || '').trim().toLowerCase() === String(q.correctAnswer || '').trim().toLowerCase();
+      } else if (q.type === 'matching') {
+        isCorrect = Array.isArray(studentAnswer) && q.matchPairs.every((pair, pairIdx) => {
+          return studentAnswer[pairIdx] === pair.right;
+        });
+      }
+
+      let pointsEarned = 0;
+      if (isCorrect) {
+        correctCount++;
+        pointsEarned = q.points || 1000;
+        score += pointsEarned;
+      }
+
+      questionsFeedback.push({
+        index: idx,
+        correct: isCorrect,
+        pointsEarned,
+        correctAnswer: q.type === 'matching' ? q.matchPairs : q.correctAnswer
+      });
+    });
+
+    const resultId = 'static_session_' + Date.now();
+    const resultRecord = {
+      id: resultId,
+      pin: exam.staticPin || 'STATIC',
+      quizId: exam.id,
+      title: `${exam.title} - Static (${nickname.trim()})`,
+      date: new Date().toISOString(),
+      hostUsername: exam.createdBy,
+      playersCount: 1,
+      players: [{
+        nickname: nickname.trim(),
+        score,
+        correctCount,
+        totalQuestions: exam.questions.length,
+        isStatic: true
+      }]
+    };
+
+    await db.collection('examify_results').doc(resultId).set(resultRecord);
+
+    res.json({
+      success: true,
+      score,
+      correctCount,
+      totalQuestions: exam.questions.length,
+      feedback: questionsFeedback
+    });
+
+  } catch (err) {
+    console.error('Static exam submit error:', err);
+    res.status(500).json({ error: 'Failed to submit answers' });
   }
 });
 
@@ -248,6 +426,29 @@ function generatePIN() {
   do {
     pin = Math.floor(100000 + Math.random() * 900000).toString();
   } while (rooms.has(pin));
+  return pin;
+}
+
+function isPinExpired(createdAt) {
+  if (!createdAt) return true;
+  const createdTime = new Date(createdAt).getTime();
+  const now = new Date().getTime();
+  return (now - createdTime) > 24 * 60 * 60 * 1000; // 24 hours
+}
+
+async function getUniqueStaticPin() {
+  let pin;
+  let isUnique = false;
+  while (!isUnique) {
+    pin = Math.floor(100000 + Math.random() * 900000).toString();
+    if (rooms.has(pin)) continue;
+    const snapshot = await db.collection('examify_exams')
+      .where('staticPin', '==', pin)
+      .get();
+    if (snapshot.empty) {
+      isUnique = true;
+    }
+  }
   return pin;
 }
 
@@ -464,7 +665,17 @@ io.on('connection', (socket) => {
     player.answerTime = timeSpent;
 
     const question = room.questions[player.currentQuestionIndex];
-    const isCorrect = answerIndex === question.correctAnswer;
+    let isCorrect = false;
+
+    if (question.type === 'short_answer') {
+      isCorrect = String(answerIndex || '').trim().toLowerCase() === String(question.correctAnswer || '').trim().toLowerCase();
+    } else if (question.type === 'matching') {
+      isCorrect = Array.isArray(answerIndex) && question.matchPairs.every((pair, idx) => {
+        return answerIndex[idx] === pair.right;
+      });
+    } else {
+      isCorrect = parseInt(answerIndex) === parseInt(question.correctAnswer);
+    }
     
     player.lastCorrect = isCorrect;
     let pointsEarned = 0;

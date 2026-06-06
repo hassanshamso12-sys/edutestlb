@@ -1,6 +1,68 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, Trash2, Play, ArrowLeft, PlusCircle, Check, HelpCircle, Save, Info, Sparkles, LogOut, FileText, Image, Globe, RefreshCw, X, Calendar, Award, BarChart3, Users } from 'lucide-react';
 
+const loadPdfJs = () => {
+  return new Promise((resolve) => {
+    if (window.pdfjsLib) {
+      resolve(window.pdfjsLib);
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    script.onload = () => {
+      const pdfjsLib = window['pdfjs-dist/build/pdf'];
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      resolve(pdfjsLib);
+    };
+    document.head.appendChild(script);
+  });
+};
+
+const parseExamQuestions = (text) => {
+  const lines = text.split('\n');
+  const questionsList = [];
+  let currentQuestion = null;
+
+  lines.forEach(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
+    const questionMatch = trimmed.match(/^(?:Q|Question)?\s*(\d+)[.)\]:-]\s*(.+)/i);
+    const optionMatch = trimmed.match(/^([A-D])\s*[.)\]:-]\s*(.+)/i);
+
+    if (questionMatch) {
+      if (currentQuestion) {
+        questionsList.push(currentQuestion);
+      }
+      currentQuestion = {
+        question: questionMatch[2].trim(),
+        options: [],
+        correctAnswer: 0,
+        type: 'multiple_choice',
+        timeLimit: 20,
+        points: 1000
+      };
+    } else if (optionMatch && currentQuestion) {
+      currentQuestion.options.push(optionMatch[2].trim());
+    } else if (currentQuestion) {
+      // Append text if it doesn't look like option keys
+      if (!trimmed.match(/^[A-D]\s*[.)\]:-]/i)) {
+        currentQuestion.question += ' ' + trimmed;
+      }
+    }
+  });
+
+  if (currentQuestion) {
+    questionsList.push(currentQuestion);
+  }
+
+  return questionsList.map(q => {
+    while (q.options.length < 4) q.options.push('');
+    if (q.options.length > 4) q.options = q.options.slice(0, 4);
+    return q;
+  });
+};
+
 export default function TeacherDashboard({ teacherToken, teacherUsername, onHostExam, onLogout, onBack }) {
   const [exams, setExams] = useState([]);
   const [results, setResults] = useState([]);
@@ -14,12 +76,22 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
   const [examTitle, setExamTitle] = useState('');
   const [examDescription, setExamDescription] = useState('');
   const [questions, setQuestions] = useState([]);
+  const [examType, setExamType] = useState('live'); // 'live' or 'static'
+  const [staticPin, setStaticPin] = useState('');
+  const [pdfBase64, setPdfBase64] = useState('');
+
+  // PDF Viewer states
+  const [showPdfViewer, setShowPdfViewer] = useState(false);
+  const [pdfParsing, setPdfParsing] = useState(false);
+  const [pdfRendering, setPdfRendering] = useState(false);
 
   // Active Question Form States
   const [currentQIndex, setCurrentQIndex] = useState(-1); // -1 for new question
+  const [questionType, setQuestionType] = useState('multiple_choice'); // multiple_choice, true_false, short_answer, matching
   const [questionText, setQuestionText] = useState('');
   const [options, setOptions] = useState(['', '', '', '']);
-  const [correctAnswer, setCorrectAnswer] = useState(0);
+  const [correctAnswer, setCorrectAnswer] = useState(0); // number or string
+  const [matchPairs, setMatchPairs] = useState([{ left: '', right: '' }, { left: '', right: '' }]);
   const [timeLimit, setTimeLimit] = useState(20);
   const [points, setPoints] = useState(1000);
   const [questionImage, setQuestionImage] = useState(''); // Base64 or URL
@@ -65,7 +137,6 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
       });
       if (!res.ok) throw new Error('Failed to fetch exam results.');
       const data = await res.json();
-      // Sort results by date descending
       setResults(data.sort((a, b) => new Date(b.date) - new Date(a.date)));
       setError(null);
     } catch (err) {
@@ -81,6 +152,10 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
     setExamTitle('');
     setExamDescription('');
     setQuestions([]);
+    setExamType('live');
+    setStaticPin('');
+    setPdfBase64('');
+    setShowPdfViewer(false);
     resetQuestionForm();
     setIsEditing(true);
   };
@@ -90,15 +165,21 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
     setExamTitle(exam.title);
     setExamDescription(exam.description || '');
     setQuestions(exam.questions || []);
+    setExamType(exam.examType || 'live');
+    setStaticPin(exam.staticPin || '');
+    setPdfBase64(exam.pdfBase64 || '');
+    setShowPdfViewer(!!exam.pdfBase64);
     resetQuestionForm();
     setIsEditing(true);
   };
 
   const resetQuestionForm = () => {
     setCurrentQIndex(-1);
+    setQuestionType('multiple_choice');
     setQuestionText('');
     setOptions(['', '', '', '']);
     setCorrectAnswer(0);
+    setMatchPairs([{ left: '', right: '' }, { left: '', right: '' }]);
     setTimeLimit(20);
     setPoints(1000);
     setQuestionImage('');
@@ -146,19 +227,38 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
       alert('Question prompt cannot be empty.');
       return;
     }
-    if (options.some(opt => !opt.trim())) {
-      alert('All 4 choices must have text.');
-      return;
-    }
 
-    const questionObj = {
+    let questionObj = {
+      type: questionType,
       question: questionText.trim(),
-      options: options.map(o => o.trim()),
-      correctAnswer,
       timeLimit: parseInt(timeLimit),
       points: parseInt(points),
-      image: questionImage // Base64 data URL or external HTTP URL
+      image: questionImage
     };
+
+    if (questionType === 'multiple_choice') {
+      if (options.some(opt => !opt.trim())) {
+        alert('All 4 choices must have text.');
+        return;
+      }
+      questionObj.options = options.map(o => o.trim());
+      questionObj.correctAnswer = parseInt(correctAnswer);
+    } else if (questionType === 'true_false') {
+      questionObj.options = ['True', 'False'];
+      questionObj.correctAnswer = parseInt(correctAnswer);
+    } else if (questionType === 'short_answer') {
+      if (!String(correctAnswer).trim()) {
+        alert('Please specify the correct answer text.');
+        return;
+      }
+      questionObj.correctAnswer = String(correctAnswer).trim();
+    } else if (questionType === 'matching') {
+      if (matchPairs.some(p => !p.left.trim() || !p.right.trim())) {
+        alert('All matching pairs must have both left and right values.');
+        return;
+      }
+      questionObj.matchPairs = matchPairs.map(p => ({ left: p.left.trim(), right: p.right.trim() }));
+    }
 
     if (currentQIndex === -1) {
       setQuestions(prev => [...prev, questionObj]);
@@ -174,9 +274,19 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
   const handleLoadQuestionToForm = (idx) => {
     const q = questions[idx];
     setCurrentQIndex(idx);
+    setQuestionType(q.type || 'multiple_choice');
     setQuestionText(q.question);
-    setOptions([...q.options]);
+    if (q.options) {
+      setOptions([...q.options]);
+    } else {
+      setOptions(['', '', '', '']);
+    }
     setCorrectAnswer(q.correctAnswer);
+    if (q.matchPairs) {
+      setMatchPairs([...q.matchPairs]);
+    } else {
+      setMatchPairs([{ left: '', right: '' }, { left: '', right: '' }]);
+    }
     setTimeLimit(q.timeLimit);
     setPoints(q.points);
     setQuestionImage(q.image || '');
@@ -204,6 +314,9 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
       id: examId,
       title: examTitle.trim(),
       description: examDescription.trim(),
+      examType,
+      staticPin,
+      pdfBase64,
       questions
     };
 
@@ -237,9 +350,110 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
     'rgba(16, 185, 129, 0.4)'
   ];
 
+  const handlePdfUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    if (file.size > 2 * 1024 * 1024) {
+      alert('PDF size must be less than 2MB.');
+      return;
+    }
+
+    setPdfParsing(true);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64Data = reader.result;
+      setPdfBase64(base64Data);
+      setShowPdfViewer(true);
+
+      try {
+        const arrayBuffer = base64ToArrayBuffer(base64Data);
+        setTimeout(async () => {
+          if (pdfContainerRef.current) {
+            setPdfRendering(true);
+            await renderPdfPages(arrayBuffer, pdfContainerRef.current);
+            setPdfRendering(false);
+          }
+        }, 100);
+
+        const text = await extractPdfText(arrayBuffer);
+        const parsedQ = parseExamQuestions(text);
+        if (parsedQ.length > 0 && confirm(`We automatically detected ${parsedQ.length} questions in this PDF. Would you like to import them as drafts?`)) {
+          setQuestions(parsedQ);
+        }
+      } catch (err) {
+        console.error('PDF parsing error:', err);
+        alert('Could not parse PDF text, but you can still view it while building your exam.');
+      } finally {
+        setPdfParsing(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const base64ToArrayBuffer = (base64) => {
+    const binaryString = window.atob(base64.split(',')[1]);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes.buffer;
+  };
+
+  const extractPdfText = async (pdfData) => {
+    const pdfjsLib = await loadPdfJs();
+    const loadingTask = pdfjsLib.getDocument({ data: pdfData });
+    const pdf = await loadingTask.promise;
+    let fullText = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items.map(item => item.str).join(' ');
+      fullText += pageText + '\n';
+    }
+    return fullText;
+  };
+
+  const renderPdfPages = async (pdfData, containerEl) => {
+    const pdfjsLib = await loadPdfJs();
+    const loadingTask = pdfjsLib.getDocument({ data: pdfData });
+    const pdf = await loadingTask.promise;
+    
+    containerEl.innerHTML = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale: 1.2 });
+      
+      const canvas = document.createElement('canvas');
+      canvas.style.width = '100%';
+      canvas.style.marginBottom = '1.5rem';
+      canvas.style.borderRadius = '8px';
+      canvas.style.boxShadow = '0 4px 12px rgba(0,0,0,0.25)';
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      
+      const context = canvas.getContext('2d');
+      await page.render({ canvasContext: context, viewport }).promise;
+      containerEl.appendChild(canvas);
+    }
+  };
+
+  const pdfContainerRef = React.useRef(null);
+
+  useEffect(() => {
+    if (showPdfViewer && pdfBase64 && pdfContainerRef.current) {
+      const arrayBuffer = base64ToArrayBuffer(pdfBase64);
+      setPdfRendering(true);
+      renderPdfPages(arrayBuffer, pdfContainerRef.current).then(() => {
+        setPdfRendering(false);
+      });
+    }
+  }, [showPdfViewer, pdfBase64]);
+
   if (isEditing) {
     return (
-      <div className="app-container" style={{ maxWidth: '1200px' }}>
+      <div className="app-container" style={{ maxWidth: '1400px' }}>
         {/* Header */}
         <div className="responsive-header-builder" style={{ marginBottom: '2rem' }}>
           <button className="btn btn-secondary" onClick={() => setIsEditing(false)}>
@@ -254,8 +468,36 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
         </div>
 
         {/* Builder Layout Grid */}
-        <div className="builder-layout">
+        <div className="builder-layout" style={{
+          display: 'grid',
+          gridTemplateColumns: showPdfViewer ? '1fr 1fr 1.2fr' : '1.2fr 1.5fr',
+          gap: '1.5rem',
+          maxWidth: '100%',
+          transition: 'all 0.3s ease'
+        }}>
           
+          {/* 0. PDF Viewer panel */}
+          {showPdfViewer && (
+            <div className="glass" style={{ padding: '1.5rem', maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.5rem' }}>
+                <h3 style={{ fontSize: '1.1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <FileText size={16} style={{ color: 'var(--primary)' }} /> Exam PDF Reference
+                </h3>
+                <button className="btn btn-secondary" style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem' }} onClick={() => setShowPdfViewer(false)}>
+                  Hide
+                </button>
+              </div>
+              <div style={{ flex: 1, overflowY: 'auto', paddingRight: '0.5rem' }} ref={pdfContainerRef}>
+                {pdfRendering && (
+                  <div style={{ textAlign: 'center', padding: '2rem 0' }}>
+                    <div style={{ width: '30px', height: '30px', border: '3px solid var(--primary)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 0.5rem' }}></div>
+                    <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Rendering pages...</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Left Panel: Exam Meta and Questions List */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             <div className="glass" style={{ padding: '1.5rem' }}>
@@ -283,6 +525,84 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                     onChange={(e) => setExamDescription(e.target.value)}
                   />
                 </div>
+
+                {/* Exam Mode Toggle */}
+                <div>
+                  <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.4rem' }}>Exam Delivery Mode</label>
+                  <div style={{ display: 'flex', gap: '0.5rem', background: 'rgba(0,0,0,0.2)', padding: '0.25rem', borderRadius: '8px' }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{
+                        flex: 1,
+                        padding: '0.4rem',
+                        fontSize: '0.85rem',
+                        background: examType === 'live' ? 'var(--primary)' : 'transparent',
+                        color: 'white',
+                        borderRadius: '6px'
+                      }}
+                      onClick={() => setExamType('live')}
+                    >
+                      Live Exam
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{
+                        flex: 1,
+                        padding: '0.4rem',
+                        fontSize: '0.85rem',
+                        background: examType === 'static' ? 'var(--primary)' : 'transparent',
+                        color: 'white',
+                        borderRadius: '6px'
+                      }}
+                      onClick={() => setExamType('static')}
+                    >
+                      Self-Paced
+                    </button>
+                  </div>
+                </div>
+
+                {examType === 'static' && staticPin && (
+                  <div style={{ background: 'rgba(99, 102, 241, 0.08)', border: '1.5px solid rgba(99, 102, 241, 0.2)', padding: '0.75rem 1rem', borderRadius: '8px' }}>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 500 }}>ACTIVE STUDENT PIN (VALID 24H)</div>
+                    <strong style={{ fontSize: '1.5rem', color: 'white', letterSpacing: '0.05em' }}>{staticPin}</strong>
+                    <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>
+                      Students join by entering this PIN on the home page.
+                    </div>
+                  </div>
+                )}
+
+                {/* PDF Upload widget */}
+                <div>
+                  <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.4rem' }}>Source PDF (Optional)</label>
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <label className="btn btn-secondary" style={{ flex: 1, padding: '0.5rem', fontSize: '0.85rem', cursor: 'pointer', textAlign: 'center' }}>
+                      {pdfBase64 ? 'Change PDF' : 'Upload Exam PDF'}
+                      <input
+                        type="file"
+                        accept="application/pdf"
+                        style={{ display: 'none' }}
+                        onChange={handlePdfUpload}
+                      />
+                    </label>
+                    {pdfBase64 && !showPdfViewer && (
+                      <button type="button" className="btn btn-secondary" style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }} onClick={() => setShowPdfViewer(true)}>
+                        Show PDF
+                      </button>
+                    )}
+                    {pdfBase64 && (
+                      <button type="button" className="btn btn-danger" style={{ padding: '0.5rem', borderRadius: '8px' }} onClick={() => { setPdfBase64(''); setShowPdfViewer(false); }}>
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                  {pdfParsing && (
+                    <div style={{ fontSize: '0.8rem', color: 'var(--primary)', marginTop: '0.3rem' }} className="animate-pulse">
+                      Analyzing and extracting text from PDF...
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -295,7 +615,7 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
               
               <div style={{ flex: 1, overflowY: 'auto', maxHeight: '350px', display: 'flex', flexDirection: 'column', gap: '0.75rem', paddingRight: '0.5rem' }}>
                 {questions.length === 0 ? (
-                  <div style={{ textCenter: 'center', padding: '3rem 1rem', color: 'var(--text-muted)', textAlign: 'center', border: '1.5px dashed var(--border-color)', borderRadius: '8px' }}>
+                  <div style={{ textAlign: 'center', padding: '3rem 1rem', color: 'var(--text-muted)', border: '1.5px dashed var(--border-color)', borderRadius: '8px' }}>
                     <HelpCircle size={32} style={{ margin: '0 auto 0.75rem', color: 'var(--text-muted)' }} />
                     <p>No questions added yet.</p>
                   </div>
@@ -319,12 +639,16 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                         <strong>{idx + 1}. </strong>
                         {q.image && <Image size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />}
                         <span style={{ fontSize: '0.95rem' }}>{q.question}</span>
+                        <span style={{ fontSize: '0.75rem', background: 'rgba(255,255,255,0.06)', padding: '0.1rem 0.3rem', borderRadius: '4px', color: 'var(--text-muted)' }}>
+                          {q.type ? q.type.substring(0, 5) : 'mc'}
+                        </span>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
                         <span style={{ fontSize: '0.75rem', background: 'rgba(255,255,255,0.06)', padding: '0.2rem 0.5rem', borderRadius: '4px', color: 'var(--text-secondary)' }}>
                           {q.timeLimit}s
                         </span>
                         <button
+                          type="button"
                           className="btn btn-danger"
                           style={{ padding: '0.3rem', borderRadius: '4px' }}
                           onClick={(e) => handleDeleteQuestion(idx, e)}
@@ -350,6 +674,34 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
             </h3>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+              {/* Question Type Selection */}
+              <div>
+                <label style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.4rem' }}>Question Type</label>
+                <select
+                  className="input-field"
+                  value={questionType}
+                  onChange={(e) => {
+                    const type = e.target.value;
+                    setQuestionType(type);
+                    if (type === 'true_false') {
+                      setOptions(['True', 'False']);
+                      setCorrectAnswer(0);
+                    } else if (type === 'multiple_choice') {
+                      setOptions(['', '', '', '']);
+                      setCorrectAnswer(0);
+                    } else {
+                      setOptions([]);
+                      setCorrectAnswer('');
+                    }
+                  }}
+                >
+                  <option value="multiple_choice">Multiple Choice</option>
+                  <option value="true_false">True / False</option>
+                  <option value="short_answer">Short Answer</option>
+                  <option value="matching">Matching Pairs</option>
+                </select>
+              </div>
+
               {/* Question Text */}
               <div>
                 <label style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.4rem' }}>Question Prompt</label>
@@ -368,10 +720,8 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                   Question Image (Optional)
                 </label>
                 <div className="upload-grid">
-                  {/* File Upload / Link options */}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                     <div style={{ display: 'flex', gap: '0.5rem' }}>
-                      {/* Local File input trigger */}
                       <label className="btn btn-secondary" style={{ flex: 1, padding: '0.5rem', fontSize: '0.85rem', cursor: 'pointer', textAlign: 'center' }}>
                         <Image size={14} style={{ marginRight: '0.3rem' }} /> Upload File
                         <input
@@ -382,7 +732,6 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                         />
                       </label>
                     </div>
-                    {/* URL text fallback */}
                     <div style={{ position: 'relative' }}>
                       <input
                         type="text"
@@ -396,7 +745,6 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                     </div>
                   </div>
 
-                  {/* Thumbnail Preview */}
                   <div className="glass" style={{ height: '85px', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden', border: '1px dashed var(--border-color)', borderRadius: '8px' }}>
                     {questionImage ? (
                       <>
@@ -415,59 +763,162 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                         </button>
                       </>
                     ) : (
-                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>No image uploaded</span>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>No image</span>
                     )}
                   </div>
                 </div>
               </div>
 
-              {/* Choices Inputs */}
-              <div>
-                <label style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.5rem' }}>
-                  Answer Choices (Check correct option on left)
-                </label>
+              {/* Conditional Question Fields depending on Type */}
+
+              {/* A. Multiple Choice */}
+              {questionType === 'multiple_choice' && (
+                <div>
+                  <label style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.5rem' }}>
+                    Answer Choices (Check correct option circle)
+                  </label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                    {options.map((opt, idx) => (
+                      <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                        <button
+                          type="button"
+                          onClick={() => setCorrectAnswer(idx)}
+                          style={{
+                            width: '32px',
+                            height: '32px',
+                            borderRadius: '50%',
+                            border: parseInt(correctAnswer) === idx ? 'none' : '2px solid var(--border-color)',
+                            background: parseInt(correctAnswer) === idx ? 'linear-gradient(135deg, var(--primary), var(--accent))' : 'transparent',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            cursor: 'pointer',
+                            flexShrink: 0
+                          }}
+                        >
+                          {parseInt(correctAnswer) === idx && <Check size={16} color="white" />}
+                        </button>
+                        
+                        <input
+                          type="text"
+                          className="input-field"
+                          style={{ 
+                            borderColor: optionInputBorders[idx],
+                            background: parseInt(correctAnswer) === idx ? 'rgba(255,255,255,0.03)' : ''
+                          }}
+                          placeholder={`Choice ${idx + 1}`}
+                          value={opt}
+                          onChange={(e) => {
+                            const updated = [...options];
+                            updated[idx] = e.target.value;
+                            setOptions(updated);
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* B. True/False */}
+              {questionType === 'true_false' && (
+                <div>
+                  <label style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.5rem' }}>
+                    Select Correct Value
+                  </label>
+                  <div style={{ display: 'flex', gap: '1rem' }}>
+                    {['True', 'False'].map((val, idx) => {
+                      const isSelected = parseInt(correctAnswer) === idx;
+                      return (
+                        <button
+                          type="button"
+                          key={idx}
+                          className="btn"
+                          onClick={() => setCorrectAnswer(idx)}
+                          style={{
+                            flex: 1,
+                            background: isSelected ? 'var(--primary)' : 'rgba(255,255,255,0.05)',
+                            border: isSelected ? '1px solid var(--primary)' : '1px solid var(--border-color)',
+                            color: 'white'
+                          }}
+                        >
+                          {val}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* C. Short Answer */}
+              {questionType === 'short_answer' && (
+                <div>
+                  <label style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.4rem' }}>
+                    Correct Answer Text (Case-Insensitive matching)
+                  </label>
+                  <input
+                    type="text"
+                    className="input-field"
+                    placeholder="e.g. Paris"
+                    value={String(correctAnswer)}
+                    onChange={(e) => setCorrectAnswer(e.target.value)}
+                  />
+                </div>
+              )}
+
+              {/* D. Matching */}
+              {questionType === 'matching' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                  {options.map((opt, idx) => (
-                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                      <button
-                        type="button"
-                        onClick={() => setCorrectAnswer(idx)}
-                        style={{
-                          width: '32px',
-                          height: '32px',
-                          borderRadius: '50%',
-                          border: correctAnswer === idx ? 'none' : '2px solid var(--border-color)',
-                          background: correctAnswer === idx ? 'linear-gradient(135deg, var(--primary), var(--accent))' : 'transparent',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          cursor: 'pointer',
-                          transition: 'all 0.2s',
-                          flexShrink: 0
-                        }}
-                      >
-                        {correctAnswer === idx && <Check size={16} color="white" />}
-                      </button>
-                      
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <label style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>Matching Pairs</label>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ padding: '0.25rem 0.6rem', fontSize: '0.8rem' }}
+                      onClick={() => setMatchPairs([...matchPairs, { left: '', right: '' }])}
+                    >
+                      + Add Pair
+                    </button>
+                  </div>
+                  {matchPairs.map((pair, idx) => (
+                    <div key={idx} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                       <input
                         type="text"
                         className="input-field"
-                        style={{ 
-                          borderColor: optionInputBorders[idx],
-                          background: correctAnswer === idx ? 'rgba(255,255,255,0.03)' : ''
-                        }}
-                        placeholder={`Choice ${idx + 1}`}
-                        value={opt}
+                        placeholder="Left item"
+                        value={pair.left}
                         onChange={(e) => {
-                          const updated = [...options];
-                          updated[idx] = e.target.value;
-                          setOptions(updated);
+                          const updated = [...matchPairs];
+                          updated[idx].left = e.target.value;
+                          setMatchPairs(updated);
                         }}
                       />
+                      <span style={{ color: 'var(--text-muted)' }}>➔</span>
+                      <input
+                        type="text"
+                        className="input-field"
+                        placeholder="Right matching item"
+                        value={pair.right}
+                        onChange={(e) => {
+                          const updated = [...matchPairs];
+                          updated[idx].right = e.target.value;
+                          setMatchPairs(updated);
+                        }}
+                      />
+                      {matchPairs.length > 2 && (
+                        <button
+                          type="button"
+                          className="btn btn-danger"
+                          style={{ padding: '0.5rem', borderRadius: '8px' }}
+                          onClick={() => setMatchPairs(matchPairs.filter((_, pIdx) => pIdx !== idx))}
+                        >
+                          <X size={14} />
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
-              </div>
+              )}
 
               {/* Configurations */}
               <div className="two-col-grid">
@@ -493,9 +944,9 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                     value={points}
                     onChange={(e) => setPoints(e.target.value)}
                   >
-                    <option value="500">500 points (Easy)</option>
-                    <option value="1000">1000 points (Normal)</option>
-                    <option value="2000">2000 points (Hard/Double)</option>
+                    <option value="500">500 points</option>
+                    <option value="1000">1000 points</option>
+                    <option value="2000">2000 points</option>
                   </select>
                 </div>
               </div>
