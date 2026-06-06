@@ -1,14 +1,47 @@
 import React, { useState } from 'react';
-import { HelpCircle, Award, CheckCircle2, XCircle, ArrowLeft, ArrowRight, Send, AlertCircle } from 'lucide-react';
+import { HelpCircle, Award, CheckCircle2, XCircle, ArrowLeft, ArrowRight, Send, AlertCircle, FileText } from 'lucide-react';
 import { audio } from '../utils/audio';
 
+const loadPdfJs = () => {
+  return new Promise((resolve) => {
+    if (window.pdfjsLib) {
+      resolve(window.pdfjsLib);
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    script.onload = () => {
+      const pdfjsLib = window['pdfjs-dist/build/pdf'];
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      resolve(pdfjsLib);
+    };
+    document.head.appendChild(script);
+  });
+};
+
 export default function StudentStaticClient({ exam, nickname, onExit }) {
+  const [shuffledQuestions, setShuffledQuestions] = useState(() => {
+    const questionsWithIndex = exam.questions.map((q, idx) => ({
+      ...q,
+      originalIndex: idx
+    }));
+    if (exam.randomizeQuestions) {
+      const array = [...questionsWithIndex];
+      for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+      }
+      return array;
+    }
+    return questionsWithIndex;
+  });
+
   const [currentQIndex, setCurrentQIndex] = useState(0);
   const [answers, setAnswers] = useState(Array(exam.questions.length).fill(null));
   
   // Matching active selection state: { leftIndex: rightItemString }
-  const [matchingPairs, setMatchingPairs] = useState(
-    exam.questions.map(q => q.type === 'matching' ? {} : null)
+  const [matchingPairs, setMatchingPairs] = useState(() =>
+    shuffledQuestions.map(q => q.type === 'matching' ? {} : null)
   );
   const [selectedLeftIdx, setSelectedLeftIdx] = useState(null);
 
@@ -17,20 +50,80 @@ export default function StudentStaticClient({ exam, nickname, onExit }) {
   const [results, setResults] = useState(null);
   const [error, setError] = useState('');
 
+  // Countdown timer state
+  const [timeLeft, setTimeLeft] = useState(20);
+
+  const currentQuestion = shuffledQuestions[currentQIndex];
+  const isLastQuestion = currentQIndex === shuffledQuestions.length - 1;
+
+  React.useEffect(() => {
+    if (!exam.isTimed || results) return;
+    setTimeLeft(currentQuestion?.timeLimit || 20);
+  }, [currentQIndex, exam.isTimed, results]);
+
+  React.useEffect(() => {
+    if (!exam.isTimed || results) return;
+    if (timeLeft <= 0) {
+      if (isLastQuestion) {
+        handleSubmitExam();
+      } else {
+        setCurrentQIndex(prev => prev + 1);
+      }
+      return;
+    }
+    const timer = setInterval(() => {
+      setTimeLeft(prev => prev - 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [timeLeft, exam.isTimed, results, isLastQuestion]);
+
+  // PDF Rendering States
+  const [pdfRendering, setPdfRendering] = useState(false);
+  const pdfContainerRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (exam.pdfUrl && pdfContainerRef.current) {
+      setPdfRendering(true);
+      loadPdfJs().then(pdfjsLib => {
+        return pdfjsLib.getDocument({ url: exam.pdfUrl }).promise;
+      }).then(async (pdf) => {
+        if (!pdfContainerRef.current) return;
+        pdfContainerRef.current.innerHTML = '';
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const viewport = page.getViewport({ scale: 1.2 });
+          const canvas = document.createElement('canvas');
+          canvas.style.width = '100%';
+          canvas.style.marginBottom = '1.5rem';
+          canvas.style.borderRadius = '8px';
+          canvas.style.boxShadow = '0 4px 12px rgba(0,0,0,0.25)';
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          const context = canvas.getContext('2d');
+          await page.render({ canvasContext: context, viewport }).promise;
+          if (pdfContainerRef.current) {
+            pdfContainerRef.current.appendChild(canvas);
+          }
+        }
+        setPdfRendering(false);
+      }).catch(err => {
+        console.error('Error rendering PDF for student:', err);
+        setPdfRendering(false);
+      });
+    }
+  }, [exam.pdfUrl, results]);
+
   const optionColors = ['option-red', 'option-blue', 'option-yellow', 'option-green'];
   
-  const currentQuestion = exam.questions[currentQIndex];
-  const isLastQuestion = currentQIndex === exam.questions.length - 1;
-
   const handleSelectMC = (optIdx) => {
     const newAnswers = [...answers];
-    newAnswers[currentQIndex] = optIdx;
+    newAnswers[currentQuestion.originalIndex] = optIdx;
     setAnswers(newAnswers);
   };
 
   const handleShortAnswerChange = (val) => {
     const newAnswers = [...answers];
-    newAnswers[currentQIndex] = val;
+    newAnswers[currentQuestion.originalIndex] = val;
     setAnswers(newAnswers);
   };
 
@@ -59,7 +152,7 @@ export default function StudentStaticClient({ exam, nickname, onExit }) {
     // Save formatted answer: list of right items in order of left items
     const rightItemsInLeftOrder = currentQuestion.leftItems.map((_, idx) => currentMatches[idx] || null);
     const newAnswers = [...answers];
-    newAnswers[currentQIndex] = rightItemsInLeftOrder;
+    newAnswers[currentQuestion.originalIndex] = rightItemsInLeftOrder;
     setAnswers(newAnswers);
 
     setSelectedLeftIdx(null);
@@ -71,7 +164,7 @@ export default function StudentStaticClient({ exam, nickname, onExit }) {
     setMatchingPairs(newMatchingPairs);
 
     const newAnswers = [...answers];
-    newAnswers[currentQIndex] = null;
+    newAnswers[currentQuestion.originalIndex] = null;
     setAnswers(newAnswers);
     setSelectedLeftIdx(null);
   };
@@ -228,7 +321,7 @@ export default function StudentStaticClient({ exam, nickname, onExit }) {
 
   // 2. Taking static exam page
   return (
-    <div className="app-container" style={{ maxWidth: '800px', minHeight: '90vh', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+    <div className="app-container" style={{ maxWidth: exam.pdfUrl ? '1400px' : '800px', minHeight: '90vh', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
       
       {/* Header Info */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
@@ -240,10 +333,85 @@ export default function StudentStaticClient({ exam, nickname, onExit }) {
           <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>Taking as: </span>
           <strong style={{ color: 'var(--primary)' }}>{nickname}</strong>
           <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.1rem' }}>
-            Question {currentQIndex + 1} of {exam.questions.length}
+            Question {currentQIndex + 1} of {shuffledQuestions.length}
           </div>
+          {exam.isTimed && (
+            <div style={{ fontSize: '1rem', color: timeLeft <= 5 ? 'var(--color-red)' : 'var(--accent)', fontWeight: 700, marginTop: '0.25rem' }}>
+              Time Left: {timeLeft}s
+            </div>
+          )}
         </div>
       </div>
+
+      {/* Grid Layout for PDF Reference + Taker Interface */}
+      <div className="builder-layout" style={{
+        display: 'grid',
+        gridTemplateColumns: exam.pdfUrl ? '1.2fr 1fr' : '1fr',
+        gap: '1.5rem',
+        width: '100%',
+        flex: 1
+      }}>
+        
+        {/* PDF Reference Panel */}
+        {exam.pdfUrl && (
+          <div className="glass" style={{ padding: '1.5rem', maxHeight: '75vh', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.5rem' }}>
+              <h3 style={{ fontSize: '1.1rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#fff' }}>
+                <FileText size={16} style={{ color: 'var(--primary)' }} /> Exam PDF Reference
+              </h3>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', paddingRight: '0.5rem' }} ref={pdfContainerRef}>
+              {pdfRendering && (
+                <div style={{ textAlign: 'center', padding: '2rem 0' }}>
+                  <div style={{ width: '30px', height: '30px', border: '3px solid var(--primary)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 0.5rem' }}></div>
+                  <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Rendering exam pages...</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Question Panel */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', justifyContent: 'space-between' }}>
+
+      {/* Question Quick Navigation Grid */}
+      {exam.allowNavigation && (
+        <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', marginBottom: '1.5rem', justifyContent: 'center' }}>
+          {shuffledQuestions.map((_, idx) => {
+            const isCurrent = currentQIndex === idx;
+            const q = shuffledQuestions[idx];
+            const isAnswered = answers[q.originalIndex] !== null && answers[q.originalIndex] !== '';
+            return (
+              <button
+                key={idx}
+                type="button"
+                onClick={() => setCurrentQIndex(idx)}
+                style={{
+                  width: '36px',
+                  height: '36px',
+                  borderRadius: '50%',
+                  border: isCurrent ? '2px solid var(--primary)' : '1px solid var(--border-color)',
+                  background: isCurrent
+                    ? 'var(--primary)'
+                    : isAnswered
+                    ? 'rgba(99, 102, 241, 0.25)'
+                    : 'rgba(0,0,0,0.15)',
+                  color: isCurrent ? 'white' : isAnswered ? 'var(--primary)' : 'var(--text-secondary)',
+                  fontWeight: 700,
+                  fontSize: '0.9rem',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}
+              >
+                {idx + 1}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Main Panel */}
       <div className="glass" style={{ padding: '2rem', flex: 1, display: 'flex', flexDirection: 'column', gap: '1.5rem', minHeight: '300px' }}>
@@ -268,8 +436,8 @@ export default function StudentStaticClient({ exam, nickname, onExit }) {
           {/* A. Multiple Choice or True/False */}
           {(currentQuestion.type === 'multiple_choice' || currentQuestion.type === 'true_false' || !currentQuestion.type) && (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '0.85rem' }}>
-              {currentQuestion.options.map((opt, idx) => {
-                const isSelected = answers[currentQIndex] === idx;
+              {currentQuestion.options?.map((opt, idx) => {
+                const isSelected = answers[currentQuestion.originalIndex] === idx;
                 return (
                   <button
                     key={idx}
@@ -317,7 +485,7 @@ export default function StudentStaticClient({ exam, nickname, onExit }) {
                 type="text"
                 className="input-field"
                 placeholder="Your answer..."
-                value={answers[currentQIndex] || ''}
+                value={answers[currentQuestion.originalIndex] || ''}
                 onChange={(e) => handleShortAnswerChange(e.target.value)}
                 style={{ fontSize: '1.2rem', padding: '1rem 1.5rem' }}
               />
@@ -404,15 +572,17 @@ export default function StudentStaticClient({ exam, nickname, onExit }) {
       </div>
 
       {/* Navigation Footer */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.5rem', borderTop: '1px solid var(--border-color)', paddingTop: '1.25rem' }}>
-        <button
-          className="btn btn-secondary"
-          disabled={currentQIndex === 0}
-          onClick={() => setCurrentQIndex(prev => prev - 1)}
-          style={{ padding: '0.6rem 1.5rem' }}
-        >
-          <ArrowLeft size={16} /> Back
-        </button>
+      <div style={{ display: 'flex', justifyContent: exam.allowNavigation ? 'space-between' : 'flex-end', alignItems: 'center', marginTop: '1.5rem', borderTop: '1px solid var(--border-color)', paddingTop: '1.25rem' }}>
+        {exam.allowNavigation && (
+          <button
+            className="btn btn-secondary"
+            disabled={currentQIndex === 0}
+            onClick={() => setCurrentQIndex(prev => prev - 1)}
+            style={{ padding: '0.6rem 1.5rem' }}
+          >
+            <ArrowLeft size={16} /> Back
+          </button>
+        )}
 
         {error && (
           <div style={{ color: 'var(--color-red)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
@@ -438,6 +608,8 @@ export default function StudentStaticClient({ exam, nickname, onExit }) {
             Next <ArrowRight size={16} />
           </button>
         )}
+      </div>
+        </div>
       </div>
     </div>
   );

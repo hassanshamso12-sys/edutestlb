@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Play, ArrowLeft, PlusCircle, Check, HelpCircle, Save, Info, Sparkles, LogOut, FileText, Image, Globe, RefreshCw, X, Calendar, Award, BarChart3, Users } from 'lucide-react';
+import { Plus, Trash2, Play, ArrowLeft, PlusCircle, Check, HelpCircle, Save, Info, Sparkles, LogOut, FileText, Image, Globe, RefreshCw, X, Calendar, Award, BarChart3, Users, Download } from 'lucide-react';
 
 const loadPdfJs = () => {
   return new Promise((resolve) => {
@@ -78,7 +78,11 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
   const [questions, setQuestions] = useState([]);
   const [examType, setExamType] = useState('live'); // 'live' or 'static'
   const [staticPin, setStaticPin] = useState('');
+  const [pdfUrl, setPdfUrl] = useState('');
   const [pdfBase64, setPdfBase64] = useState('');
+  const [isTimed, setIsTimed] = useState(true);
+  const [allowNavigation, setAllowNavigation] = useState(true);
+  const [randomizeQuestions, setRandomizeQuestions] = useState(false);
 
   // PDF Viewer states
   const [showPdfViewer, setShowPdfViewer] = useState(false);
@@ -147,6 +151,61 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
     }
   };
 
+  const handleDeleteResult = async (id) => {
+    if (!confirm('Are you sure you want to delete this result record? This action cannot be undone.')) return;
+    try {
+      const res = await fetch(`/api/results/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${teacherToken}` }
+      });
+      if (res.ok) {
+        setResults(prev => prev.filter(r => r.id !== id));
+        if (viewingResultDetail?.id === id) {
+          setViewingResultDetail(null);
+        }
+      } else {
+        alert('Failed to delete results from database.');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Error connecting to delete result.');
+    }
+  };
+
+  const handleDownloadCSV = (res) => {
+    const headers = ['Student Name', 'Score (Points)', 'Correct Answers', 'Total Questions', 'Percentage (%)'];
+    const rows = res.players.map(player => {
+      const ratio = player.totalQuestions > 0 ? (player.correctCount / player.totalQuestions) : 0;
+      const accuracy = Math.round(ratio * 100);
+      return [
+        `"${player.nickname.replace(/"/g, '""')}"`,
+        player.score,
+        player.correctCount,
+        player.totalQuestions,
+        accuracy
+      ];
+    });
+
+    const csvContent = [
+      `"Exam Report: ${res.title.replace(/"/g, '""')}"`,
+      `"Date: ${new Date(res.date).toLocaleString()}"`,
+      `"PIN: ${res.pin}"`,
+      '',
+      headers.join(','),
+      ...rows.map(row => row.join(','))
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    const cleanTitle = res.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    link.setAttribute('download', `report_${cleanTitle}_${Date.now()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const handleCreateNewExam = () => {
     setExamId('exam_' + Date.now());
     setExamTitle('');
@@ -154,7 +213,11 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
     setQuestions([]);
     setExamType('live');
     setStaticPin('');
+    setPdfUrl('');
     setPdfBase64('');
+    setIsTimed(true);
+    setAllowNavigation(true);
+    setRandomizeQuestions(false);
     setShowPdfViewer(false);
     resetQuestionForm();
     setIsEditing(true);
@@ -167,8 +230,12 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
     setQuestions(exam.questions || []);
     setExamType(exam.examType || 'live');
     setStaticPin(exam.staticPin || '');
-    setPdfBase64(exam.pdfBase64 || '');
-    setShowPdfViewer(!!exam.pdfBase64);
+    setPdfUrl(exam.pdfUrl || '');
+    setPdfBase64('');
+    setIsTimed(exam.isTimed !== undefined ? exam.isTimed : true);
+    setAllowNavigation(exam.allowNavigation !== undefined ? exam.allowNavigation : true);
+    setRandomizeQuestions(exam.randomizeQuestions !== undefined ? exam.randomizeQuestions : false);
+    setShowPdfViewer(!!exam.pdfUrl);
     resetQuestionForm();
     setIsEditing(true);
   };
@@ -205,19 +272,35 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
     }
   };
 
-  // Image Selector File Handler (converts to Base64)
+  // Image Selector File Handler (uploads to storage and gets url)
   const handleImageUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
-    if (file.size > 500 * 1024) {
-      alert('Image file size must be less than 500KB to ensure smooth transfers.');
+    if (file.size > 2 * 1024 * 1024) {
+      alert('Image file size must be less than 2MB.');
       return;
     }
 
     const reader = new FileReader();
-    reader.onloadend = () => {
-      setQuestionImage(reader.result); // Save Base64 Data URL
+    reader.onloadend = async () => {
+      const base64Data = reader.result;
+      try {
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ base64Data })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setQuestionImage(data.url);
+        } else {
+          alert('Failed to upload image to server.');
+        }
+      } catch (err) {
+        console.error(err);
+        alert('Error uploading image.');
+      }
     };
     reader.readAsDataURL(file);
   };
@@ -316,7 +399,10 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
       description: examDescription.trim(),
       examType,
       staticPin,
-      pdfBase64,
+      pdfUrl,
+      isTimed,
+      allowNavigation,
+      randomizeQuestions,
       questions
     };
 
@@ -354,8 +440,8 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
     const file = e.target.files[0];
     if (!file) return;
 
-    if (file.size > 2 * 1024 * 1024) {
-      alert('PDF size must be less than 2MB.');
+    if (file.size > 5 * 1024 * 1024) {
+      alert('PDF size must be less than 5MB.');
       return;
     }
 
@@ -365,6 +451,20 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
       const base64Data = reader.result;
       setPdfBase64(base64Data);
       setShowPdfViewer(true);
+
+      // Upload in parallel
+      fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base64Data })
+      })
+      .then(res => res.ok ? res.json() : Promise.reject())
+      .then(data => {
+        setPdfUrl(data.url);
+      })
+      .catch(err => {
+        console.error('Failed to save PDF to persistent storage:', err);
+      });
 
       try {
         const arrayBuffer = base64ToArrayBuffer(base64Data);
@@ -442,14 +542,30 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
   const pdfContainerRef = React.useRef(null);
 
   useEffect(() => {
-    if (showPdfViewer && pdfBase64 && pdfContainerRef.current) {
-      const arrayBuffer = base64ToArrayBuffer(pdfBase64);
-      setPdfRendering(true);
-      renderPdfPages(arrayBuffer, pdfContainerRef.current).then(() => {
-        setPdfRendering(false);
-      });
+    if (showPdfViewer && pdfContainerRef.current) {
+      if (pdfBase64) {
+        const arrayBuffer = base64ToArrayBuffer(pdfBase64);
+        setPdfRendering(true);
+        renderPdfPages(arrayBuffer, pdfContainerRef.current).then(() => {
+          setPdfRendering(false);
+        });
+      } else if (pdfUrl) {
+        setPdfRendering(true);
+        fetch(pdfUrl)
+          .then(res => res.arrayBuffer())
+          .then(arrayBuffer => {
+            return renderPdfPages(arrayBuffer, pdfContainerRef.current);
+          })
+          .then(() => {
+            setPdfRendering(false);
+          })
+          .catch(err => {
+            console.error('Error loading PDF from URL:', err);
+            setPdfRendering(false);
+          });
+      }
     }
-  }, [showPdfViewer, pdfBase64]);
+  }, [showPdfViewer, pdfBase64, pdfUrl]);
 
   if (isEditing) {
     return (
@@ -563,6 +679,39 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                   </div>
                 </div>
 
+                {/* Advanced Exam Toggles */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', background: 'rgba(0, 0, 0, 0.15)', padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', fontSize: '0.85rem' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Timed Exam (Countdown)</span>
+                    <input
+                      type="checkbox"
+                      checked={isTimed}
+                      onChange={(e) => setIsTimed(e.target.checked)}
+                      style={{ width: '16px', height: '16px', cursor: 'pointer' }}
+                    />
+                  </label>
+
+                  <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', fontSize: '0.85rem' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Allow Back & Forth Navigation</span>
+                    <input
+                      type="checkbox"
+                      checked={allowNavigation}
+                      onChange={(e) => setAllowNavigation(e.target.checked)}
+                      style={{ width: '16px', height: '16px', cursor: 'pointer' }}
+                    />
+                  </label>
+
+                  <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', fontSize: '0.85rem' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Randomize Question Order</span>
+                    <input
+                      type="checkbox"
+                      checked={randomizeQuestions}
+                      onChange={(e) => setRandomizeQuestions(e.target.checked)}
+                      style={{ width: '16px', height: '16px', cursor: 'pointer' }}
+                    />
+                  </label>
+                </div>
+
                 {examType === 'static' && staticPin && (
                   <div style={{ background: 'rgba(99, 102, 241, 0.08)', border: '1.5px solid rgba(99, 102, 241, 0.2)', padding: '0.75rem 1rem', borderRadius: '8px' }}>
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 500 }}>ACTIVE STUDENT PIN (VALID 24H)</div>
@@ -578,7 +727,7 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                   <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.4rem' }}>Source PDF (Optional)</label>
                   <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                     <label className="btn btn-secondary" style={{ flex: 1, padding: '0.5rem', fontSize: '0.85rem', cursor: 'pointer', textAlign: 'center' }}>
-                      {pdfBase64 ? 'Change PDF' : 'Upload Exam PDF'}
+                      {(pdfBase64 || pdfUrl) ? 'Change PDF' : 'Upload Exam PDF'}
                       <input
                         type="file"
                         accept="application/pdf"
@@ -586,13 +735,13 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                         onChange={handlePdfUpload}
                       />
                     </label>
-                    {pdfBase64 && !showPdfViewer && (
+                    {(pdfBase64 || pdfUrl) && !showPdfViewer && (
                       <button type="button" className="btn btn-secondary" style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }} onClick={() => setShowPdfViewer(true)}>
                         Show PDF
                       </button>
                     )}
-                    {pdfBase64 && (
-                      <button type="button" className="btn btn-danger" style={{ padding: '0.5rem', borderRadius: '8px' }} onClick={() => { setPdfBase64(''); setShowPdfViewer(false); }}>
+                    {(pdfBase64 || pdfUrl) && (
+                      <button type="button" className="btn btn-danger" style={{ padding: '0.5rem', borderRadius: '8px' }} onClick={() => { setPdfBase64(''); setPdfUrl(''); setShowPdfViewer(false); }}>
                         <Trash2 size={14} />
                       </button>
                     )}
@@ -1190,9 +1339,29 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                           </div>
                         </div>
 
-                        <div style={{ textAlign: 'right' }}>
-                          <button className="btn btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
+                        <div style={{ textAlign: 'right', display: 'flex', gap: '0.4rem', justifyContent: 'flex-end', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+                          <button 
+                            className="btn btn-secondary" 
+                            style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
+                            onClick={() => setViewingResultDetail(res)}
+                          >
                             View Detail
+                          </button>
+                          <button 
+                            className="btn btn-secondary" 
+                            style={{ padding: '0.4rem', borderRadius: '8px' }}
+                            title="Download Report (CSV)"
+                            onClick={() => handleDownloadCSV(res)}
+                          >
+                            <Download size={14} />
+                          </button>
+                          <button 
+                            className="btn btn-danger" 
+                            style={{ padding: '0.4rem', borderRadius: '8px' }}
+                            title="Delete Record"
+                            onClick={() => handleDeleteResult(res.id)}
+                          >
+                            <Trash2 size={14} />
                           </button>
                         </div>
                       </div>
@@ -1219,9 +1388,25 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                   Hosted on {new Date(viewingResultDetail.date).toLocaleString()} • Game PIN: {viewingResultDetail.pin}
                 </p>
               </div>
-              <button className="btn btn-danger" style={{ padding: '0.4rem', borderRadius: '50%' }} onClick={() => setViewingResultDetail(null)}>
-                <X size={18} />
-              </button>
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <button 
+                  className="btn btn-secondary" 
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.8rem', fontSize: '0.85rem' }} 
+                  onClick={() => handleDownloadCSV(viewingResultDetail)}
+                >
+                  <Download size={14} /> Download Report
+                </button>
+                <button 
+                  className="btn btn-danger" 
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.8rem', fontSize: '0.85rem' }} 
+                  onClick={() => handleDeleteResult(viewingResultDetail.id)}
+                >
+                  <Trash2 size={14} /> Delete
+                </button>
+                <button className="btn btn-secondary" style={{ padding: '0.4rem', borderRadius: '50%', background: 'rgba(255,255,255,0.05)' }} onClick={() => setViewingResultDetail(null)}>
+                  <X size={18} />
+                </button>
+              </div>
             </div>
 
             {/* Modal Content - Player list breakdown */}

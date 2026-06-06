@@ -8,36 +8,52 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
+import { getStorage } from 'firebase-admin/storage';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // Initialize Firebase Admin
 const serviceAccountPath = path.join(__dirname, 'service-account.json');
 let adminApp;
 let db;
+let bucket;
 
 try {
   if (fs.existsSync(serviceAccountPath)) {
     adminApp = initializeApp({
-      credential: cert(JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8')))
+      credential: cert(JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'))),
+      storageBucket: 'examify-a4aa2.firebasestorage.app'
     });
     console.log('Firebase Admin initialized with local service-account.json.');
   } else {
     adminApp = initializeApp({
-      projectId: 'examify-a4aa2'
+      projectId: 'examify-a4aa2',
+      storageBucket: 'examify-a4aa2.firebasestorage.app'
     });
     console.log('Firebase Admin initialized with Application Default Credentials (ADC).');
   }
   db = getFirestore();
   console.log('Firestore connected successfully.');
+
+  try {
+    bucket = getStorage().bucket();
+  } catch (storageErr) {
+    console.warn('Firebase Storage bucket lookup failed. Using local fallback.', storageErr.message);
+  }
 } catch (e) {
   console.error('Firebase Admin initialization error:', e.message);
   process.exit(1); // Fail fast with a clear error rather than a silent crash
+}
+
+const uploadsDir = path.join(__dirname, 'public', 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
 // Helper to hash password
@@ -285,6 +301,10 @@ app.post('/api/exams/join', async (req, res) => {
       title: exam.title,
       description: exam.description,
       examType: 'static',
+      pdfUrl: exam.pdfUrl || '',
+      isTimed: exam.isTimed !== undefined ? exam.isTimed : true,
+      allowNavigation: exam.allowNavigation !== undefined ? exam.allowNavigation : true,
+      randomizeQuestions: exam.randomizeQuestions !== undefined ? exam.randomizeQuestions : false,
       questions: strippedQuestions
     };
 
@@ -398,6 +418,83 @@ app.get('/api/results', authenticateTeacher, async (req, res) => {
     res.status(500).json({ error: 'Failed to retrieve results log' });
   }
 });
+
+app.delete('/api/results/:id', authenticateTeacher, async (req, res) => {
+  try {
+    const docRef = db.collection('examify_results').doc(req.params.id);
+    const doc = await docRef.get();
+    
+    if (!doc.exists) {
+      return res.status(404).json({ error: 'Result record not found' });
+    }
+    if (doc.data().hostUsername !== req.teacherUsername) {
+      return res.status(403).json({ error: 'You do not own this result log' });
+    }
+
+    await docRef.delete();
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete result error:', err);
+    res.status(500).json({ error: 'Failed to delete result record' });
+  }
+});
+
+// Upload base64 files (images and PDFs) to persistent storage
+app.post('/api/upload', async (req, res) => {
+  console.log('Received upload request. body exists:', !!req.body, 'data length:', req.body?.base64Data?.length);
+  const { base64Data } = req.body;
+  if (!base64Data) {
+    console.warn('Upload request missing base64Data');
+    return res.status(400).json({ error: 'Missing base64Data' });
+  }
+
+  try {
+    const matches = base64Data.match(/^data:([a-zA-Z0-9]+\/[a-zA-Z0-9-.+]+);base64,(.+)$/);
+    if (!matches) {
+      console.warn('Upload request has invalid base64 format. Starts with:', base64Data.substring(0, 50));
+      return res.status(400).json({ error: 'Invalid base64 format' });
+    }
+
+    const mimeType = matches[1];
+    const buffer = Buffer.from(matches[2], 'base64');
+    const extension = mimeType.split('/')[1] || 'bin';
+    const uniqueFilename = `file_${Date.now()}_${Math.random().toString(36).substring(7)}.${extension}`;
+
+    // 1. Try Firebase Storage (Google Cloud Storage)
+    if (bucket) {
+      try {
+        const file = bucket.file(`uploads/${uniqueFilename}`);
+        await file.save(buffer, {
+          metadata: { contentType: mimeType }
+        });
+        
+        try {
+          await file.makePublic();
+        } catch (pubErr) {
+          console.warn('makePublic failed:', pubErr.message);
+        }
+
+        const publicUrl = `https://storage.googleapis.com/${bucket.name}/uploads/${uniqueFilename}`;
+        return res.json({ success: true, url: publicUrl });
+      } catch (gcsErr) {
+        console.warn('Firebase Storage upload failed, falling back to local:', gcsErr.message);
+      }
+    }
+
+    // 2. Local fallback
+    const localPath = path.join(uploadsDir, uniqueFilename);
+    fs.writeFileSync(localPath, buffer);
+    const localUrl = `/uploads/${uniqueFilename}`;
+    res.json({ success: true, url: localUrl });
+
+  } catch (err) {
+    console.error('Upload error:', err);
+    res.status(500).json({ error: 'Upload failed' });
+  }
+});
+
+// Serve local uploads statically
+app.use('/uploads', express.static(uploadsDir));
 
 // Serve frontend assets in production environment
 const distPath = path.join(__dirname, 'dist');

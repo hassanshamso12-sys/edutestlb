@@ -217,7 +217,7 @@ export default function StudentClient({ socket, pin, nickname, onExit }) {
         {/* Choices / Inputs */}
         {(currentQuestion.type === 'multiple_choice' || currentQuestion.type === 'true_false' || !currentQuestion.type) && (
           <div className="game-grid">
-            {currentQuestion.options.map((option, idx) => (
+            {currentQuestion.options?.map((option, idx) => (
               <button
                 key={idx}
                 className={`option-card ${optionColors[idx]}`}
