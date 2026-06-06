@@ -586,7 +586,7 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
         {/* Builder Layout Grid */}
         <div className="builder-layout" style={{
           display: 'grid',
-          gridTemplateColumns: showPdfViewer ? '1fr 1fr 1.2fr' : '1.2fr 1.5fr',
+          gridTemplateColumns: showPdfViewer ? 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr)' : 'minmax(0, 1.2fr) minmax(0, 1.5fr)',
           gap: '1.5rem',
           maxWidth: '100%',
           transition: 'all 0.3s ease'
@@ -784,11 +784,11 @@ export default function TeacherDashboard({ teacherToken, teacherUsername, onHost
                       }}
                       onClick={() => handleLoadQuestionToForm(idx)}
                     >
-                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginRight: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginRight: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', minWidth: 0, flex: 1 }}>
                         <strong>{idx + 1}. </strong>
                         {q.image && <Image size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />}
-                        <span style={{ fontSize: '0.95rem' }}>{q.question}</span>
-                        <span style={{ fontSize: '0.75rem', background: 'rgba(255,255,255,0.06)', padding: '0.1rem 0.3rem', borderRadius: '4px', color: 'var(--text-muted)' }}>
+                        <span style={{ fontSize: '0.95rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{q.question}</span>
+                        <span style={{ fontSize: '0.75rem', background: 'rgba(255,255,255,0.06)', padding: '0.1rem 0.3rem', borderRadius: '4px', color: 'var(--text-muted)', flexShrink: 0 }}>
                           {q.type ? q.type.substring(0, 5) : 'mc'}
                         </span>
                       </div>
